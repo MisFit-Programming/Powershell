@@ -10,10 +10,9 @@
 # Run this script with administrative privileges.
 # Example: .\SetupComputer.ps1 -ComputerName "NewComputerName" -DomainName "example.com" -DomainUser "domainuser" -DomainPassword "password"
 #
-# Author: <Your Name>
-# Date: <Date>
-# Version: <Version>
-# License: <License>
+# Author: Philip Stacy
+# Date: 20240606
+# Version: 2.0
 
 # --------------------
 # PARAMETERS
