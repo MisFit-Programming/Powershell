@@ -1,0 +1,87 @@
+#!/bin/bash
+set -eu
+
+LOGFILE="/var/log/crown-bootstrap.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "=== Crown Bootstrap Started ==="
+date
+
+# Ensure running as root
+if [ "$EUID" -ne 0 ]; then
+  echo "ERROR: Must run as root"
+  exit 1
+fi
+
+# Verify Debian 12
+if ! grep -q "bookworm" /etc/os-release; then
+  echo "ERROR: This script is intended for Debian 12 (Bookworm)."
+  exit 1
+fi
+
+echo "=== Prep: backups ==="
+ts="$(date +%F-%H%M%S)"
+mkdir -p /root/bootstrap-backups
+cp -a /etc/apt/sources.list "/root/bootstrap-backups/sources.list.${ts}" 2>/dev/null || true
+cp -a /etc/apt/sources.list.d "/root/bootstrap-backups/sources.list.d.${ts}" 2>/dev/null || true
+
+echo "=== Step 1: Disable Mono repo if present ==="
+for f in /etc/apt/sources.list.d/*mono*.list /etc/apt/sources.list.d/mono-official-stable.list; do
+  if [ -f "$f" ]; then
+    echo "Disabling: $f"
+    mv "$f" "${f}.disabled.${ts}"
+  fi
+done
+
+if grep -Rqs "mono-project.com" /etc/apt; then
+  echo "Commenting mono-project lines..."
+  grep -Rsl "mono-project.com" /etc/apt | while read -r file; do
+    cp -a "$file" "/root/bootstrap-backups/$(basename "$file").${ts}" || true
+    sed -i 's|^[[:space:]]*deb.*mono-project\.com.*|# &|g' "$file"
+  done
+fi
+
+echo "=== Step 2: Ensure Debian 12 repos exist ==="
+if ! grep -q "deb.debian.org/debian bookworm" /etc/apt/sources.list 2>/dev/null; then
+  cat <<EOF >> /etc/apt/sources.list
+
+# --- Official Debian 12 (Bookworm) repositories ---
+deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+EOF
+  echo "Debian repos added."
+else
+  echo "Debian repos already present."
+fi
+
+echo "=== Step 3: Updating apt ==="
+apt clean
+apt update
+apt upgrade -y
+
+tmpdir="$(mktemp -d)"
+cd "$tmpdir"
+
+echo "=== Step 4: Install Datto RMM agent ==="
+if wget -q -O setup.sh "https://zinfandel.rmm.datto.com/download-agent/linux/5354f689-d9a9-4f7d-8e54-67beebec100f"; then
+  sh setup.sh
+else
+  echo "Datto download failed."
+  exit 1
+fi
+
+echo "=== Step 5: Install ScreenConnect Client ==="
+if wget -qO /tmp/ScreenConnect.deb "https://support.ce-technology.com/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=3CX&c=&c=&c=&c=&c=&c=&c="; then
+  apt install -y /tmp/ScreenConnect.deb > /dev/null 2>&1
+  echo "ScreenConnect installed."
+else
+  echo "ScreenConnect download failed."
+  exit 1
+fi
+
+rm -rf "$tmpdir"
+
+echo "=== Bootstrap Complete ==="
+echo "Log file: $LOGFILE"
+echo "Backups stored under /root/bootstrap-backups/"
