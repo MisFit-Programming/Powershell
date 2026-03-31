@@ -39,3 +39,14 @@ cd path/to/Powershell
 
 # Run the script
 ./example-script.ps1
+```
+
+### Onboarding agent installer
+
+Use `Onboarding_AgentInstall.ps1` to install both Datto RMM and ScreenConnect during workstation onboarding.
+
+Run directly from GitHub:
+
+```powershell
+irm https://raw.githubusercontent.com/MisFit-Programming/Powershell/main/Onboarding_AgentInstall.ps1 | iex
+```
