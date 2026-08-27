@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Monitors live Windows network adapter packet rates.
+    Monitors live Windows network adapter packet rates and can flag broadcast or multicast storms.
 
 .DESCRIPTION
     Samples Get-NetAdapterStatistics at a configurable interval and calculates
@@ -10,6 +10,10 @@
     By default, all active network adapters are monitored. Use -Name to target
     one or more adapters, including wildcard names, or -PhysicalOnly to exclude
     virtual adapters.
+
+    Storm detection is optional. Set -StormThreshold to a packets-per-second
+    value to flag an adapter when either broadcast or multicast traffic reaches
+    or exceeds that rate.
 
 .PARAMETER Name
     One or more adapter names or wildcard patterns. If omitted, all active
@@ -27,6 +31,14 @@
 
 .PARAMETER CsvPath
     Optional path to append sample results as CSV.
+
+.PARAMETER StormThreshold
+    Optional packets-per-second threshold for broadcast or multicast traffic.
+    A value of 0 disables storm detection. Default: 0.
+
+.PARAMETER ConsecutiveStormSamples
+    Number of consecutive threshold violations required before the state changes
+    from ELEVATED to STORM. Default: 2.
 
 .EXAMPLE
     .\NetworkTrafficRateMonitor.ps1
@@ -48,6 +60,19 @@
 
     Monitor active physical adapters and append results to a CSV file.
 
+.EXAMPLE
+    .\NetworkTrafficRateMonitor.ps1 -StormThreshold 1000
+
+    Flag an adapter when broadcast or multicast receive traffic reaches
+    1,000 packets per second. Two consecutive threshold violations are required
+    before the adapter is marked STORM.
+
+.EXAMPLE
+    .\NetworkTrafficRateMonitor.ps1 -Name "Ethernet" -StormThreshold 500 -ConsecutiveStormSamples 1
+
+    Flag the specified adapter immediately when broadcast or multicast traffic
+    reaches 500 packets per second.
+
 .NOTES
     Author: Philip Stacy
     Requires Windows PowerShell / PowerShell on Windows with the NetAdapter module.
@@ -66,7 +91,13 @@ param(
 
     [switch]$PhysicalOnly,
 
-    [string]$CsvPath
+    [string]$CsvPath,
+
+    [ValidateRange(0, 1000000000)]
+    [double]$StormThreshold = 0,
+
+    [ValidateRange(1, 100)]
+    [int]$ConsecutiveStormSamples = 2
 )
 
 Set-StrictMode -Version 2.0
@@ -154,9 +185,23 @@ function Get-Rate {
 }
 
 $adapters = @(Resolve-MonitoredAdapters)
+$stormCounts = @{}
+
+foreach ($adapter in $adapters) {
+    $stormCounts[$adapter.Name] = 0
+}
 
 Write-Host "Monitoring $($adapters.Count) active adapter(s) every $IntervalSeconds second(s). Press Ctrl+C to stop."
 Write-Host "Adapters: $($adapters.Name -join ', ')"
+
+if ($StormThreshold -gt 0) {
+    Write-Host "Storm detection: enabled at $StormThreshold packets/sec for broadcast OR multicast traffic."
+    Write-Host "Storm confirmation: $ConsecutiveStormSamples consecutive sample(s)."
+}
+else {
+    Write-Host 'Storm detection: disabled. Use -StormThreshold <pps> to enable.'
+}
+
 Write-Host ''
 
 $sampleNumber = 0
@@ -181,21 +226,54 @@ while ($Samples -eq 0 -or $sampleNumber -lt $Samples) {
         $discardPps   = Get-Rate -Before $a.ReceivedDiscardedPackets -After $b.ReceivedDiscardedPackets -Seconds $IntervalSeconds
         $rxBytesPs    = Get-Rate -Before $a.ReceivedBytes -After $b.ReceivedBytes -Seconds $IntervalSeconds
 
-        [PSCustomObject]@{
+        $state = 'NORMAL'
+        $thresholdExceeded = $false
+
+        if ($StormThreshold -gt 0) {
+            if (($null -ne $broadcastPps -and $broadcastPps -ge $StormThreshold) -or
+                ($null -ne $multicastPps -and $multicastPps -ge $StormThreshold)) {
+                $thresholdExceeded = $true
+                $stormCounts[$adapter.Name] = [int]$stormCounts[$adapter.Name] + 1
+
+                if ($stormCounts[$adapter.Name] -ge $ConsecutiveStormSamples) {
+                    $state = 'STORM'
+                }
+                else {
+                    $state = 'ELEVATED'
+                }
+            }
+            else {
+                $stormCounts[$adapter.Name] = 0
+            }
+        }
+
+        $result = [PSCustomObject]@{
             Timestamp      = $timestamp.ToString('yyyy-MM-dd HH:mm:ss')
             Adapter        = $adapter.Name
+            State          = $state
             BroadcastPps   = if ($null -eq $broadcastPps) { $null } else { [math]::Round($broadcastPps, 1) }
             MulticastPps   = if ($null -eq $multicastPps) { $null } else { [math]::Round($multicastPps, 1) }
             UnicastPps     = if ($null -eq $unicastPps)   { $null } else { [math]::Round($unicastPps, 1) }
             RxMbps         = if ($null -eq $rxBytesPs)    { $null } else { [math]::Round(($rxBytesPs * 8) / 1MB, 2) }
             DiscardedPps   = if ($null -eq $discardPps)   { $null } else { [math]::Round($discardPps, 1) }
         }
+
+        if ($state -eq 'STORM') {
+            Write-Warning ("NETWORK STORM DETECTED on '{0}' | Broadcast: {1:N1} pps | Multicast: {2:N1} pps | Threshold: {3:N1} pps" -f `
+                $adapter.Name, $broadcastPps, $multicastPps, $StormThreshold)
+        }
+        elseif ($thresholdExceeded) {
+            Write-Warning ("Elevated Layer-2 traffic on '{0}' | Broadcast: {1:N1} pps | Multicast: {2:N1} pps | Confirmation sample {3}/{4}" -f `
+                $adapter.Name, $broadcastPps, $multicastPps, $stormCounts[$adapter.Name], $ConsecutiveStormSamples)
+        }
+
+        $result
     }
 
     if ($results) {
         $results |
-            Format-Table -Property Timestamp, Adapter, BroadcastPps, MulticastPps, UnicastPps, RxMbps, DiscardedPps -AutoSize |
-            Out-String -Width 240 |
+            Format-Table -Property Timestamp, Adapter, State, BroadcastPps, MulticastPps, UnicastPps, RxMbps, DiscardedPps -AutoSize |
+            Out-String -Width 260 |
             Write-Host
 
         if ($CsvPath) {
@@ -219,5 +297,11 @@ while ($Samples -eq 0 -or $sampleNumber -lt $Samples) {
     if (-not $adapters) {
         Write-Warning 'All monitored adapters are down or unavailable. Stopping.'
         break
+    }
+
+    foreach ($adapter in $adapters) {
+        if (-not $stormCounts.ContainsKey($adapter.Name)) {
+            $stormCounts[$adapter.Name] = 0
+        }
     }
 }
