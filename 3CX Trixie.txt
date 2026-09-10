@@ -14,7 +14,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Verify Debian 12
-if ! grep -q "bookworm" /etc/os-release; then
+if ! grep -q "trixie" /etc/os-release; then
   echo "ERROR: This script is intended for Debian 12 (Bookworm)."
   exit 1
 fi
