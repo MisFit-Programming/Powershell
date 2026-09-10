@@ -1,87 +1,145 @@
 #!/bin/bash
-set -eu
+set -Eeuo pipefail
 
 LOGFILE="/var/log/crown-bootstrap.log"
+BACKUP_DIR="/root/bootstrap-backups"
+TRIXIE_SOURCES="/etc/apt/sources.list.d/debian-trixie.sources"
+tmpdir=""
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
+    rm -rf -- "$tmpdir"
+  fi
+}
+trap cleanup EXIT
+
+# Check privileges before attempting to open a root-owned log file.
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  die "Must run as root."
+fi
+
 exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "=== Crown Bootstrap Started ==="
 date
 
-# Ensure running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "ERROR: Must run as root"
-  exit 1
-fi
-
-# Verify Debian 12
-if ! grep -q "trixie" /etc/os-release; then
-  echo "ERROR: This script is intended for Debian 12 (Bookworm)."
-  exit 1
+[ -r /etc/os-release ] || die "/etc/os-release is missing or unreadable."
+# shellcheck disable=SC1091
+. /etc/os-release
+if [ "${ID:-}" != "debian" ] || [ "${VERSION_CODENAME:-}" != "trixie" ]; then
+  die "This script requires Debian 13 (Trixie); detected ${PRETTY_NAME:-unknown OS}."
 fi
 
 echo "=== Prep: backups ==="
 ts="$(date +%F-%H%M%S)"
-mkdir -p /root/bootstrap-backups
-cp -a /etc/apt/sources.list "/root/bootstrap-backups/sources.list.${ts}" 2>/dev/null || true
-cp -a /etc/apt/sources.list.d "/root/bootstrap-backups/sources.list.d.${ts}" 2>/dev/null || true
+mkdir -p "$BACKUP_DIR"
+cp -a /etc/apt/sources.list "$BACKUP_DIR/sources.list.${ts}" 2>/dev/null || true
+cp -a /etc/apt/sources.list.d "$BACKUP_DIR/sources.list.d.${ts}" 2>/dev/null || true
 
-echo "=== Step 1: Disable Mono repo if present ==="
-for f in /etc/apt/sources.list.d/*mono*.list /etc/apt/sources.list.d/mono-official-stable.list; do
-  if [ -f "$f" ]; then
-    echo "Disabling: $f"
-    mv "$f" "${f}.disabled.${ts}"
+echo "=== Step 1: Disable Mono repository if present ==="
+while IFS= read -r -d '' file; do
+  if grep -qs "mono-project\.com" "$file"; then
+    echo "Disabling: $file"
+    cp -a "$file" "$BACKUP_DIR/$(basename "$file").${ts}"
+    mv -- "$file" "${file}.disabled.${ts}"
   fi
-done
+done < <(find /etc/apt/sources.list.d -maxdepth 1 -type f \
+  \( -name '*.list' -o -name '*.sources' \) -print0 2>/dev/null)
 
-if grep -Rqs "mono-project.com" /etc/apt; then
-  echo "Commenting mono-project lines..."
-  grep -Rsl "mono-project.com" /etc/apt | while read -r file; do
-    cp -a "$file" "/root/bootstrap-backups/$(basename "$file").${ts}" || true
-    sed -i 's|^[[:space:]]*deb.*mono-project\.com.*|# &|g' "$file"
+if [ -f /etc/apt/sources.list ] && grep -q "mono-project\.com" /etc/apt/sources.list; then
+  echo "Commenting Mono entries in /etc/apt/sources.list"
+  sed -i '/mono-project\.com/s/^[[:space:]]*[^#]/# &/' /etc/apt/sources.list
+fi
+
+echo "=== Step 2: Ensure Debian 13 (Trixie) repositories exist ==="
+has_apt_suite() {
+  local suite="$1"
+  local file
+
+  for file in /etc/apt/sources.list \
+      /etc/apt/sources.list.d/*.list \
+      /etc/apt/sources.list.d/*.sources; do
+    [ -f "$file" ] || continue
+    if grep -qsE "(^Suites:[[:space:]].*[[:space:]]${suite}([[:space:]]|$)|^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]]${suite}([[:space:]]|$))" "$file"; then
+      return 0
+    fi
   done
-fi
+  return 1
+}
 
-echo "=== Step 2: Ensure Debian 12 repos exist ==="
-if ! grep -q "deb.debian.org/debian bookworm" /etc/apt/sources.list 2>/dev/null; then
-  cat <<EOF >> /etc/apt/sources.list
+missing_base=false
+missing_security=false
+has_apt_suite trixie || missing_base=true
+has_apt_suite trixie-security || missing_security=true
 
-# --- Official Debian 12 (Bookworm) repositories ---
-deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-EOF
-  echo "Debian repos added."
+if ! $missing_base && ! $missing_security; then
+  echo "Trixie base, updates, and security repositories are already configured."
 else
-  echo "Debian repos already present."
+  keyring="/usr/share/keyrings/debian-archive-keyring.pgp"
+  if [ ! -e "$keyring" ]; then
+    keyring="/usr/share/keyrings/debian-archive-keyring.gpg"
+  fi
+
+  if [ ! -e "$TRIXIE_SOURCES" ]; then
+    printf '%s\n' '# Official Debian 13 (Trixie) repositories' > "$TRIXIE_SOURCES"
+  fi
+
+  if $missing_base; then
+    cat >> "$TRIXIE_SOURCES" <<EOF
+Types: deb
+URIs: https://deb.debian.org/debian
+Suites: trixie trixie-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: $keyring
+
+EOF
+  fi
+
+  if $missing_security; then
+    cat >> "$TRIXIE_SOURCES" <<EOF
+Types: deb
+URIs: https://security.debian.org/debian-security
+Suites: trixie-security
+Components: main contrib non-free non-free-firmware
+Signed-By: $keyring
+
+EOF
+  fi
+  echo "Added missing Trixie repositories to $TRIXIE_SOURCES."
 fi
 
-echo "=== Step 3: Updating apt ==="
-apt clean
-apt update
-apt upgrade -y
+echo "=== Step 3: Update packages and install prerequisites ==="
+export DEBIAN_FRONTEND=noninteractive
+apt-get clean
+apt-get update
+apt-get upgrade -y
+apt-get install -y ca-certificates wget
 
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
 
 echo "=== Step 4: Install Datto RMM agent ==="
-if wget -q -O setup.sh "https://zinfandel.rmm.datto.com/download-agent/linux/5354f689-d9a9-4f7d-8e54-67beebec100f"; then
-  sh setup.sh
+if wget --https-only -q -O setup.sh "https://zinfandel.rmm.datto.com/download-agent/linux/5354f689-d9a9-4f7d-8e54-67beebec100f"; then
+  chmod 700 setup.sh
+  sh ./setup.sh
 else
-  echo "Datto download failed."
-  exit 1
+  die "Datto download failed."
 fi
 
 echo "=== Step 5: Install ScreenConnect Client ==="
-if wget -qO /tmp/ScreenConnect.deb "https://support.ce-technology.com/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=3CX&c=&c=&c=&c=&c=&c=&c="; then
-  apt install -y /tmp/ScreenConnect.deb > /dev/null 2>&1
+screenconnect_deb="$tmpdir/ScreenConnect.deb"
+if wget --https-only -q -O "$screenconnect_deb" "https://support.ce-technology.com/Bin/ScreenConnect.ClientSetup.deb?e=Access&y=Guest&c=3CX&c=&c=&c=&c=&c=&c=&c="; then
+  apt-get install -y "$screenconnect_deb"
   echo "ScreenConnect installed."
 else
-  echo "ScreenConnect download failed."
-  exit 1
+  die "ScreenConnect download failed."
 fi
-
-rm -rf "$tmpdir"
 
 echo "=== Bootstrap Complete ==="
 echo "Log file: $LOGFILE"
-echo "Backups stored under /root/bootstrap-backups/"
+echo "Backups stored under $BACKUP_DIR/"
