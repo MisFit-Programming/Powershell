@@ -1,0 +1,2 @@
+Organize Folder based on extension:
+Get-ChildItem -File | Group-Object Extension | ForEach-Object { $ext = if ([string]::IsNullOrWhiteSpace($_.Name)) { "NO_EXTENSION" } else { $_.Name.TrimStart('.').ToUpper() }; $dest = Join-Path $PWD $ext; New-Item -ItemType Directory -Path $dest -Force | Out-Null; $_.Group | Move-Item -Destination $dest }
