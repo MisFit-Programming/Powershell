@@ -2,7 +2,11 @@
 
 Run [Share-Access-Review.ps1](Share-Access-Review.ps1) **on the file server**, in an elevated Windows PowerShell 5.1 or PowerShell 7 session. The account needs share/NTFS administration permissions and permission to create the OU/groups and update group membership. Install the Windows SmbShare and RSAT ActiveDirectory modules beforehand; the script does not install anything.
 
+The examples below assume your current directory is `scripts/file-shares` in the cloned repository:
+
 ```powershell
+Set-Location .\scripts\file-shares
+
 # Review only: inventories shares, scans child ACLs and reports the proposed mapping.
 .\Share-Access-Review.ps1
 
@@ -50,6 +54,6 @@ Preview runs have a before snapshot and proposed plan; after ACLs are collected 
 
 ## Validation
 
-The offline harness in `tests/Share-Access-Review.Tests.ps1` mocks all infrastructure I/O and verifies preview/WhatIf, named-only mapping, child-only/deny/inherit-only exclusions, OU/group creation, ACL preservation, idempotent reruns, failure blocking, name collisions and HTML escaping. Run it with Windows PowerShell 5.1 and PowerShell 7. It does not validate real AD replication, server permissions or filesystem inheritance propagation.
+The offline harness in [tests/Share-Access-Review.Tests.ps1](../../tests/Share-Access-Review.Tests.ps1) mocks all infrastructure I/O and verifies preview/WhatIf, named-only mapping, child-only/deny/inherit-only exclusions, OU/group creation, ACL preservation, idempotent reruns, failure blocking, name collisions and HTML escaping. From the repository root, run `powershell.exe -NoProfile -File .\tests\Share-Access-Review.Tests.ps1` or `pwsh -NoProfile -File .\tests\Share-Access-Review.Tests.ps1` on Windows. It does not validate real AD replication, server permissions or filesystem inheritance propagation.
 
 Implementation references: [Microsoft SMB grant documentation](https://learn.microsoft.com/en-us/powershell/module/smbshare/grant-smbshareaccess), [AD membership documentation](https://learn.microsoft.com/en-us/powershell/module/activedirectory/add-adgroupmember), and [additive filesystem ACL rules](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule).

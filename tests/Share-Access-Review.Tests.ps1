@@ -4,7 +4,7 @@
 param()
 $ErrorActionPreference='Stop'
 Microsoft.PowerShell.Core\Import-Module Microsoft.PowerShell.Security
-$source=Join-Path (Split-Path $PSScriptRoot -Parent) 'Share-Access-Review.ps1'
+$source=Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts/file-shares/Share-Access-Review.ps1'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }

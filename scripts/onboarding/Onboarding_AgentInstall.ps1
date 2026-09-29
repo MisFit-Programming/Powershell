@@ -12,7 +12,7 @@ By default, installers are run silently and this script requires administrative 
 
 .EXAMPLE
 # Run directly from GitHub (replace branch if needed)
-irm https://raw.githubusercontent.com/MisFit-Programming/Powershell/main/Onboarding_AgentInstall.ps1 | iex
+irm https://raw.githubusercontent.com/MisFit-Programming/Powershell/main/scripts/onboarding/Onboarding_AgentInstall.ps1 | iex
 #>
 
 [CmdletBinding()]
