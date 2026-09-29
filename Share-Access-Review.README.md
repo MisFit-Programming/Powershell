@@ -39,7 +39,7 @@ Group names use an uppercase share name with unsupported characters replaced by 
 
 ## Reports and logs
 
-By default each run writes unique files under `ShareReports` next to the script:
+By default each run writes unique files under `ShareReports` next to the saved script. When pasted into a console or run as an unsaved selection, it uses `ShareReports` under the current filesystem folder instead. You can always set `-OutputDirectory` explicitly; relative paths resolve against the current PowerShell location. From a non-filesystem location, specify a filesystem output path.
 
 - `ShareReview-<run>.html`: collapsible before/after share ACLs, NTFS roots, child exceptions, proposed mappings, memberships, actions, exclusions and errors.
 - `ShareReview-<run>.json`: structured version of the report with NTFS security descriptors.

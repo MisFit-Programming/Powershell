@@ -21,10 +21,23 @@ param(
     [switch]$Apply,
     [string]$DomainController,
     [string[]]$ExcludeShare = @('NETLOGON','SYSVOL'),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'ShareReports')
+    [string]$OutputDirectory
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $reportRoot = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($reportRoot)) {
+        $location = Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Specify -OutputDirectory with a filesystem path when running from a non-filesystem location.'
+        }
+        $reportRoot = $location.ProviderPath
+    }
+    $OutputDirectory = Join-Path -Path $reportRoot -ChildPath 'ShareReports'
+}
+# Resolve relative paths against PowerShell's current location, not the process directory.
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $script:failed = $false
 $script:events = New-Object 'System.Collections.Generic.List[object]'
 $script:mappings = New-Object 'System.Collections.Generic.List[object]'

@@ -103,6 +103,27 @@ function Read-Result {
     Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
 }
 
+# Exercise the actual startup code without running AD/SMB commands or exit.
+$sourceText=[IO.File]::ReadAllText($source)
+$startupEnd=$sourceText.IndexOf('$script:failed = $false')
+Assert ($startupEnd -gt 0) 'startup marker exists'
+$startup=[scriptblock]::Create($sourceText.Substring(0,$startupEnd)+"`n"+'$OutputDirectory')
+Push-Location -LiteralPath $testOutput
+try {
+    $fallback=& { $PSScriptRoot=''; & $startup }
+    Assert ($fallback -eq (Join-Path $testOutput 'ShareReports')) 'pasted/unsaved code uses current filesystem folder'
+    $probeRoot=Join-Path $testOutput 'saved-script'
+    $null=[IO.Directory]::CreateDirectory($probeRoot)
+    $probePath=Join-Path $probeRoot 'Startup-Probe.ps1'
+    [IO.File]::WriteAllText($probePath,$startup.ToString())
+    $saved=& $probePath
+    Assert ($saved -eq (Join-Path $probeRoot 'ShareReports')) 'saved script uses its own folder'
+    $relative=& { $PSScriptRoot=''; & $startup -OutputDirectory '.\custom-reports' }
+    Assert ($relative -eq (Join-Path $testOutput 'custom-reports')) 'explicit relative output uses PowerShell location'
+    $explicit=& { $PSScriptRoot=''; & $startup -OutputDirectory $testOutput }
+    Assert ($explicit -eq $testOutput) 'explicit absolute output is preserved'
+} finally { Pop-Location }
+
 & $source -DomainController 'mock-dc' -OutputDirectory "$testOutput\preview"
 Assert ($LASTEXITCODE -eq 0) 'preview exit'
 Assert ($global:testState.Writes -eq 0) 'preview performed no writes'
@@ -134,4 +155,4 @@ Assert ($LASTEXITCODE -eq 1 -and $global:testState.Writes -eq $writes) 'incomple
 $global:testState.FailScan=$false; $global:testState.Collision=$true
 & $source -DomainController 'mock-dc' -OutputDirectory "$testOutput\collision" -Apply -Confirm:$false
 Assert ($LASTEXITCODE -eq 1 -and $global:testState.Writes -eq $writes) 'group collision blocks writes'
-Write-Host "PASS: offline preview, WhatIf, apply, rerun, failure, collision, ACL preservation, named-only mapping and HTML encoding on PowerShell $($PSVersionTable.PSVersion)."
+Write-Host "PASS: output-path fallback, offline preview, WhatIf, apply, rerun, failure, collision, ACL preservation, named-only mapping and HTML encoding on PowerShell $($PSVersionTable.PSVersion)."
