@@ -12,7 +12,7 @@ Exit 0 = complete, 1 = errors/partial failure. There is no automatic rollback.
 .EXAMPLE
 .\Share-Access-Review.ps1
 .EXAMPLE
-.\Share-Access-Review.ps1 -Apply -ExcludeShare 'NETLOGON','SYSVOL','Backups'
+.\Share-Access-Review.ps1 -Apply -ExcludeShare 'NETLOGON','SYSVOL','print$','Backups'
 .EXAMPLE
 .\Share-Access-Review.ps1 -Apply -WhatIf
 #>
@@ -20,7 +20,7 @@ Exit 0 = complete, 1 = errors/partial failure. There is no automatic rollback.
 param(
     [switch]$Apply,
     [string]$DomainController,
-    [string[]]$ExcludeShare = @('NETLOGON','SYSVOL'),
+    [string[]]$ExcludeShare = @('NETLOGON','SYSVOL','print$'),
     [string]$OutputDirectory
 )
 Set-StrictMode -Version Latest
@@ -125,23 +125,36 @@ function Inventory {
     foreach ($share in @(Get-SmbShare -ErrorAction Stop | Sort-Object ScopeName,Name)) {
         $label="$($share.ScopeName)/$($share.Name)"
         $reason=''; $valid=$true; $smb=@(); $ntfs=@(); $exceptions=@(); $sddl=''; $owner=''; $protected=$false
+        # Device-backed shares (for example SQL FILESTREAM/RsFx) are not folder
+        # roots. Do not pass their paths to Get-Item, Get-Acl or Set-Acl.
+        $folderPath=([string]$share.Path -match '^[A-Za-z]:[\\/]')
         if ($share.Special) { $reason='Special/administrative share' }
         elseif ($share.Name -in $ExcludeShare) { $reason='Explicitly excluded share' }
         elseif ([string]::IsNullOrWhiteSpace($share.Path)) { $reason='No filesystem path' }
+        elseif (-not $folderPath) { $reason='Virtual/device or unsupported non-local-folder path; report only' }
         try { $smb=@(Smb-Rows $share.Name $share.ScopeName) }
-        catch { $valid=$false; Log 'Error' $label "$Phase SMB ACL: $($_.Exception.Message)" }
-        if ($share.Path) {
+        catch {
+            $valid=$false; $severity='Error'; if ($reason) { $severity='Warning' }
+            Log $severity $label "$Phase SMB ACL: $($_.Exception.Message)"
+        }
+        if ($folderPath) {
             try {
                 $item=Get-Item -LiteralPath $share.Path -Force -ErrorAction Stop
                 if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $reason='Root is a reparse point' }
                 $acl=Get-Acl -LiteralPath $share.Path -ErrorAction Stop
                 $ntfs=@(Ntfs-Rows $acl); $sddl=$acl.Sddl; $owner=$acl.Owner; $protected=$acl.AreAccessRulesProtected
                 if (-not $reason) { $exceptions=@(Child-Exceptions $share.Path "$Phase $label") }
-            } catch { $valid=$false; Log 'Error' $label "$Phase NTFS root: $($_.Exception.Message)" }
+            } catch {
+                $valid=$false; $severity='Error'; if ($reason) { $severity='Warning' }
+                Log $severity $label "$Phase NTFS root: $($_.Exception.Message)"
+            }
+        } else {
+            $valid=$false
+            Log 'Skipped' $label "$Phase NTFS root: path is not a supported local folder; no filesystem access attempted."
         }
-        if ($reason) { Log 'Skipped' $label "$Phase : $reason. Root details reported; recursive scan skipped." }
+        if ($reason) { Log 'Skipped' $label "$Phase : $reason. Available share/root details reported; recursive scan skipped." }
         [pscustomobject]@{Name=$share.Name; Scope=$share.ScopeName; Path=$share.Path; Description=$share.Description
-            Special=[bool]$share.Special; Exclusion=$reason; RootReadable=$valid; State=[string]$share.ShareState
+            Special=[bool]$share.Special; Exclusion=$reason; FolderPathSupported=$folderPath; RootReadable=$valid; State=[string]$share.ShareState
             EncryptData=$share.EncryptData; FolderEnumerationMode=[string]$share.FolderEnumerationMode
             Owner=$owner; InheritanceBlocked=$protected; Sddl=$sddl; SMB=$smb; NTFS=$ntfs; Exceptions=$exceptions}
     }
@@ -289,7 +302,7 @@ function Inventory-Html {
     param([object[]]$Items)
     foreach ($item in $Items) {
         '<details><summary>'+ (Html "$($item.Scope)/$($item.Name) - $($item.Path)") +'</summary>'
-        Table @($item) @('Description','Special','Exclusion','RootReadable','State','EncryptData','FolderEnumerationMode','Owner','InheritanceBlocked')
+        Table @($item) @('Description','Special','Exclusion','FolderPathSupported','RootReadable','State','EncryptData','FolderEnumerationMode','Owner','InheritanceBlocked')
         '<h4>SMB ACL</h4>'; Table @($item.SMB) @('Identity','SID','Rights','Type')
         '<h4>NTFS root ACL</h4>'; Table @($item.NTFS) @('Identity','SID','Rights','Type','IsInherited','Inheritance','Propagation')
         '<h4>Child explicit / unique ACLs and scan exceptions</h4>'
@@ -321,7 +334,7 @@ try {
             # An inheritable grant must not change an excluded share's root via
             # an alias or a parent path that is also shared.
             $rootPath=[IO.Path]::GetFullPath($share.Path).TrimEnd('\')
-            foreach ($excluded in @($before | Where-Object {$_.Exclusion -and $_.Path})) {
+            foreach ($excluded in @($before | Where-Object {$_.Exclusion -and $_.FolderPathSupported})) {
                 $excludedPath=[IO.Path]::GetFullPath($excluded.Path).TrimEnd('\')
                 if ($excludedPath -ieq $rootPath -or $excludedPath.StartsWith($rootPath+'\',[StringComparison]::OrdinalIgnoreCase)) {
                     throw "Root grant could affect excluded share $($excluded.Name) at $excludedPath. Exclude this parent/alias share as well."

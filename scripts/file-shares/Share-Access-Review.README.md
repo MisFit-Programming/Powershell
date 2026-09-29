@@ -15,7 +15,7 @@ Set-Location .\scripts\file-shares
 
 # Optional explicit DC, additional excluded shares and report destination.
 .\Share-Access-Review.ps1 -DomainController 'DC01.example.com' `
-    -ExcludeShare 'NETLOGON','SYSVOL','Backups' `
+    -ExcludeShare 'NETLOGON','SYSVOL','print$','Backups' `
     -OutputDirectory 'C:\Reports\SharePermissions' -Apply
 
 # Preview with the same parameters; reports are still written.
@@ -24,7 +24,8 @@ Set-Location .\scripts\file-shares
 
 ## Behavior
 
-- Inventories every local SMB share, including hidden, administrative and excluded shares. Special shares are always excluded from modification. NETLOGON and SYSVOL are excluded by default. Supplying `-ExcludeShare` replaces that default list, so include them in your custom list if applicable. Exclusions use exact, case-insensitive share names.
+- Inventories every local SMB share, including hidden, administrative and excluded shares. Special shares are always excluded from modification. NETLOGON, SYSVOL and the printer-driver share `print$` are excluded by default. Supplying `-ExcludeShare` replaces that default list, so include them in your custom list if applicable. Exclusions use exact, case-insensitive share names.
+- Only ordinary local drive paths such as `D:\Shares\Data` are eligible for filesystem review/provisioning. Virtual/device paths, including SQL FILESTREAM paths under `\\?\GLOBALROOT\Device\RsFx...`, and other unsupported paths are report-only. Their available SMB ACLs and exclusion reasons are reported; no filesystem access or permission changes are attempted. These shares do not prevent ordinary folder shares from being provisioned. SQL FILESTREAM access is managed through SQL Server; see [Microsoft's FILESTREAM security documentation](https://learn.microsoft.com/en-us/sql/relational-databases/blob/filestream-sql-server#filestream-security).
 - Creates the protected `OU=Share Permissions` directly beneath the selected AD domain root if required.
 - Creates domain-local security groups `DLSG_FS_<SHARE>_RW` and `DLSG_FS_<SHARE>_RO`, including empty groups when there are no mapped users.
 - Grants RW **SMB Change + NTFS Modify**, and RO **SMB Read + NTFS ReadAndExecute**. NTFS grants apply to the root and inherit to subfolders and files that accept inheritance. It does not reset child ACLs or enable inheritance on protected children.
@@ -37,7 +38,7 @@ Set-Location .\scripts\file-shares
 
 This deliberately follows the requested union of named users from SMB and root NTFS. It is **not an effective-access calculation**. A user with access at only one layer will gain a grant at both layers; a partial write ACE becomes Modify; inheritable root access can extend access into descendants. Full-control users keep their original FullControl ACEs while the new RW group receives Modify. Existing group-based access and denies are not evaluated. No original ACE or membership is removed.
 
-Preflight blocks all changes if inventory or mapping fails, names collide, an existing managed group contains non-user members, or a root grant could affect an excluded share's root through an alias/parent path. Apply-time failures are recorded and other plans continue. Previously managed groups belonging to another server/share are rejected using their description marker. Existing unmarked groups must be domain-local security groups in the correct OU; review their reported memberships before applying.
+Preflight blocks all changes if an eligible share's inventory or mapping fails, names collide, an existing managed group contains non-user members, or a root grant could affect an excluded share's root through an alias/parent path. Failed ACL reads on report-only/excluded shares are logged as warnings and do not block provisioning. Apply-time failures are recorded and other plans continue. Previously managed groups belonging to another server/share are rejected using their description marker. Existing unmarked groups must be domain-local security groups in the correct OU; review their reported memberships before applying.
 
 Group names use an uppercase share name with unsupported characters replaced by `_`. Very long names receive a stable hash suffix. Collisions between scopes/shares stop provisioning. Because the requested names do not include a server name, identical share names on different servers need separate planning; the script does not silently reuse a group marked for another server.
 

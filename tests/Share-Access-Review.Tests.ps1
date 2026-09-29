@@ -10,7 +10,7 @@ $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[re
 if ($errors.Count) { throw ($errors | Out-String) }
 $testOutput=Join-Path ([IO.Path]::GetTempPath()) ('ShareAccessReviewTests-PS'+$PSVersionTable.PSVersion.Major+'-'+[guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory($testOutput)
-$global:testState=@{Groups=@{}; OU=$false; Writes=0; Smb=@{}; Acl=@{}; FailScan=$false; Collision=$false}
+$global:testState=@{Groups=@{}; OU=$false; Writes=0; Smb=@{}; Acl=@{}; FailScan=$false; Collision=$false; VirtualReads=0; ExcludedReadFails=$false}
 $domainSid='S-1-5-21-111-222-333'
 $global:testUsers=@{}
 foreach ($pair in @(@('alice',1001),@('bob',1002),@('childonly',1003),@('denied',1004),@('inheritonly',1005))) {
@@ -70,7 +70,9 @@ function Get-SmbShare {
     $all=@(
         [pscustomobject]@{Name='Data';ScopeName='*';Path='X:\Data';Description='<unsafe & text>';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'},
         [pscustomobject]@{Name='ADMIN$';ScopeName='*';Path='X:\Excluded';Description='Admin';Special=$true;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'},
-        [pscustomobject]@{Name='SYSVOL';ScopeName='*';Path='X:\Excluded';Description='Excluded';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'}
+        [pscustomobject]@{Name='SYSVOL';ScopeName='*';Path='X:\Excluded';Description='Excluded';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'},
+        [pscustomobject]@{Name='print$';ScopeName='*';Path='X:\Excluded';Description='Printer drivers';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'},
+        [pscustomobject]@{Name='SQL_Filestream';ScopeName='*';Path='\\?\GLOBALROOT\Device\RsFx0423\<localmachine>\SQL_Filestream';Description='Virtual device';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'}
     )
     if ($global:testState.Collision) {
         $all+= [pscustomobject]@{Name='Data';ScopeName='ClusterScope';Path='X:\Data';Description='Collision';Special=$false;ShareState='Online';EncryptData=$false;FolderEnumerationMode='Unrestricted'}
@@ -82,7 +84,11 @@ function Grant-SmbShareAccess {
     param($Name,$ScopeName,$AccountName,$AccessRight,[switch]$Force,$ErrorAction)
     $global:testState.Smb[$Name]+=[pscustomobject]@{AccountName=$AccountName; AccessRight=$AccessRight; AccessControlType='Allow'}; $global:testState.Writes++
 }
-function Get-Item { param($LiteralPath,[switch]$Force,$ErrorAction) [pscustomobject]@{Attributes=[IO.FileAttributes]::Directory} }
+function Get-Item {
+    param($LiteralPath,[switch]$Force,$ErrorAction)
+    if ($LiteralPath -like '*GLOBALROOT*') { $global:testState.VirtualReads++; throw 'Method failed with unexpected error code 87.' }
+    [pscustomobject]@{Attributes=[IO.FileAttributes]::Directory}
+}
 function Get-ChildItem {
     param($LiteralPath,[switch]$Force,$ErrorAction)
     if ($global:testState.FailScan) { throw 'Simulated unreadable child directory' }
@@ -90,6 +96,8 @@ function Get-ChildItem {
 }
 function Get-Acl {
     param($LiteralPath,$ErrorAction)
+    if ($LiteralPath -like '*GLOBALROOT*') { $global:testState.VirtualReads++; throw 'Method failed with unexpected error code 87.' }
+    if ($LiteralPath -eq 'X:\Excluded' -and $global:testState.ExcludedReadFails) { throw 'Excluded ACL unavailable' }
     # Return a detached copy, like the real cmdlet.
     $copy=[Security.AccessControl.DirectorySecurity]::new()
     $copy.SetSecurityDescriptorSddlForm($global:testState.Acl[$LiteralPath].Sddl)
@@ -128,7 +136,9 @@ try {
 Assert ($LASTEXITCODE -eq 0) 'preview exit'
 Assert ($global:testState.Writes -eq 0) 'preview performed no writes'
 $r=Read-Result "$testOutput\preview"
-Assert (@($r.Before).Count -eq 3) 'special and excluded shares inventoried'
+Assert (@($r.Before).Count -eq 5) 'special, excluded, printer and virtual shares inventoried'
+Assert (($r.Before | Where-Object {$_.Name -eq 'SQL_Filestream'}).Exclusion -like 'Virtual/device*') 'virtual shares excluded with a reason'
+Assert ($global:testState.VirtualReads -eq 0) 'no filesystem reads on virtual device paths'
 Assert (@($r.Plan).Count -eq 2) 'two groups only for Data'
 Assert (($r.Plan | Where-Object {$_.Bucket -eq 'RW'}).NamedUsers -eq 'alice') 'RW from NTFS beats SMB read'
 Assert (($r.Plan | Where-Object {$_.Bucket -eq 'RO'}).NamedUsers -eq 'bob') 'RO named users only; no child, group, inherit-only or denied users'
@@ -144,11 +154,16 @@ Assert ($LASTEXITCODE -eq 0) 'apply exit'
 Assert ($global:testState.OU -and $global:testState.Groups.Count -eq 2) 'OU and groups created'
 Assert ($global:testState.Acl['X:\Excluded'].Sddl -eq $excludedBefore) 'excluded roots untouched'
 $r=Read-Result "$testOutput\apply"
-Assert (@($r.After).Count -eq 3) 'after inventory'
+Assert (@($r.After).Count -eq 5) 'after inventory includes report-only shares'
+Assert ($global:testState.VirtualReads -eq 0) 'apply and after inventory never touch virtual device paths'
 Assert (@($r.Memberships | Where-Object {$_.Phase -eq 'After'}).Count -eq 2) 'verified memberships reported'
 $writes=$global:testState.Writes
 & $source -DomainController 'mock-dc' -OutputDirectory "$testOutput\rerun" -Apply -Confirm:$false
 Assert ($LASTEXITCODE -eq 0 -and $global:testState.Writes -eq $writes) 'rerun is idempotent'
+$global:testState.ExcludedReadFails=$true
+& $source -DomainController 'mock-dc' -OutputDirectory "$testOutput\excluded-read-failure" -Apply -Confirm:$false
+Assert ($LASTEXITCODE -eq 0 -and $global:testState.Writes -eq $writes) 'excluded ACL read failures are nonblocking warnings'
+$global:testState.ExcludedReadFails=$false
 $global:testState.FailScan=$true
 & $source -DomainController 'mock-dc' -OutputDirectory "$testOutput\failure" -Apply -Confirm:$false
 Assert ($LASTEXITCODE -eq 1 -and $global:testState.Writes -eq $writes) 'incomplete scan blocks writes and fails'
