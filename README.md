@@ -36,6 +36,7 @@ Paths below are relative to the repository root. Scripts are independent tools; 
 | [Create_One_Drive.ps1](scripts/microsoft-365/Create_One_Drive.ps1) | Requests OneDrive personal sites for licensed users in batches of 199. | Existing MSOnline and SharePoint Online cmdlets (`Connect-MsolService`, `Connect-SPOService`, `Request-SPOPersonalSite`). Define `$Credential` and replace `{URL}` with the tenant admin URL. This is a legacy template requiring configuration and tenant compatibility checks. |
 | [NetworkTrafficRateMonitor.ps1](scripts/monitoring/NetworkTrafficRateMonitor.ps1) | Shows receive packet/throughput rates and optional broadcast/multicast storm detection. | Windows with `NetAdapter`. Supports adapter name patterns, physical-only filtering, sampling intervals/counts, storm thresholds, and optional CSV output. Runs until Ctrl+C unless `-Samples` is set. |
 | [WindowsServerHealthMonitor.ps1](scripts/monitoring/WindowsServerHealthMonitor.ps1) | Refreshing console dashboard for CPU, memory, storage, sessions, services, connectivity, processes, and events. | Windows Server; PowerShell 5.1 compatible. Elevation gives more complete visibility. Configurable thresholds and additional services; `-NoLog` disables alert logging. Does not remediate or restart services; Ctrl+C stops it. |
+| [DeviceHealthCheck.ps1](scripts/reporting/DeviceHealthCheck/DeviceHealthCheck.ps1) | Read-only Windows health assessment with native IT Glue document publishing, weighted score, coverage, and twelve role packs. | Datto variables `strITGLUE` and `itGlueOrgID`; full engine requires PowerShell 5.1. Includes legacy unsupported reporting, offline tests, and [deployment guide](scripts/reporting/DeviceHealthCheck/README.md). No remediation. |
 | [DeviceReport.ps1](scripts/reporting/DeviceReport.ps1) | Builds an HTML inventory of server roles, AD details, and device information. | Uses Windows Server/AD cmdlets, including `Get-WindowsFeature` and `Get-ADOrganizationalUnit`. Targets `C:\Temp\DeviceReport.html`. Existing section-scoping and recursive OU traversal code needs review before relying on report completeness. |
 | [Pomodoro.ps1](scripts/utilities/Pomodoro.ps1) | Interactive work/break timer with a continue prompt. | Edit duration settings in the source (25/5/15 minutes by default). Every fourth loop runs a long break instead of a work/short-break pair. |
 | [3CX bookworm.txt](linux/3cx/3CX%20bookworm.txt) | Debian 12 bootstrap: adjusts apt sources, upgrades packages, and installs Datto RMM/ScreenConnect. | Bash script stored as `.txt`; requires root on Bookworm and download tools. Uses organization-specific agent URLs. Logs to `/var/log/crown-bootstrap.log` and backs up apt configuration under `/root/bootstrap-backups`. |
@@ -118,4 +119,12 @@ Git history is retained through normal commits without rewriting earlier commits
 
 ```powershell
 git log --follow -- scripts/file-shares/Share-Access-Review.ps1
+```
+
+### Device Health Check validation
+
+The [health-assessment suite](scripts/reporting/DeviceHealthCheck/tests/DeviceHealthCheck.Tests.ps1) tests collection failures, scoring, read-only guards and mocked IT Glue publishing. See its [results and remaining validation](scripts/reporting/DeviceHealthCheck/tests/DeviceHealthCheck.TestResults.md).
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -File .\scripts\reporting\DeviceHealthCheck\tests\DeviceHealthCheck.Tests.ps1
 ```
