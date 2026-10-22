@@ -128,3 +128,7 @@ The [health-assessment suite](scripts/reporting/DeviceHealthCheck/tests/DeviceHe
 ```powershell
 powershell.exe -NoProfile -NonInteractive -File .\scripts\reporting\DeviceHealthCheck\tests\DeviceHealthCheck.Tests.ps1
 ```
+
+### Ticket Diagnostics
+
+[Windows Ticket Diagnostics](scripts/reporting/TicketDiagnostics/README.md) collects a read-only device baseline, creates Markdown/JSON and a ZIP, and optionally delivers through n8n to OneDrive and Teams. Includes a checksum-verified GitHub launcher, workflow template, and regression tests. [Download v1.0.0](https://github.com/MisFit-Programming/Powershell/releases/tag/v1.0.0).
