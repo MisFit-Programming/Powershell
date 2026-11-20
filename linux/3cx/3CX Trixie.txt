@@ -5,6 +5,7 @@ LOGFILE="/var/log/crown-bootstrap.log"
 BACKUP_DIR="/root/bootstrap-backups"
 TRIXIE_SOURCES="/etc/apt/sources.list.d/debian-trixie.sources"
 tmpdir=""
+sources_stage=""
 
 die() {
   echo "ERROR: $*" >&2
@@ -12,6 +13,9 @@ die() {
 }
 
 cleanup() {
+  if [ -n "$sources_stage" ]; then
+    rm -rf -- "$sources_stage"
+  fi
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     rm -rf -- "$tmpdir"
   fi
@@ -36,10 +40,15 @@ if [ "${ID:-}" != "debian" ] || [ "${VERSION_CODENAME:-}" != "trixie" ]; then
 fi
 
 echo "=== Prep: backups ==="
-ts="$(date +%F-%H%M%S)"
-mkdir -p "$BACKUP_DIR"
-cp -a /etc/apt/sources.list "$BACKUP_DIR/sources.list.${ts}" 2>/dev/null || true
-cp -a /etc/apt/sources.list.d "$BACKUP_DIR/sources.list.d.${ts}" 2>/dev/null || true
+# Serialize source-file changes made by overlapping bootstrap runs.
+exec 9>/run/crown-bootstrap-sources.lock
+flock 9
+ts="$(date +%F-%H%M%S-%N)"
+mkdir -p "$BACKUP_DIR" /etc/apt/sources.list.d
+if [[ -f /etc/apt/sources.list ]]; then
+  cp -a /etc/apt/sources.list "$BACKUP_DIR/sources.list.${ts}"
+fi
+cp -a /etc/apt/sources.list.d "$BACKUP_DIR/sources.list.d.${ts}"
 
 echo "=== Step 1: Disable Mono repository if present ==="
 while IFS= read -r -d '' file; do
@@ -57,66 +66,105 @@ if [ -f /etc/apt/sources.list ] && grep -q "mono-project\.com" /etc/apt/sources.
 fi
 
 echo "=== Step 2: Ensure Debian 13 (Trixie) repositories exist ==="
-has_apt_suite() {
-  local suite="$1"
-  local file
+write_stanza() {
+  cat <<EOF
+Types: deb
+URIs: $1
+Suites: $2
+Components: main contrib non-free non-free-firmware
+Signed-By: $3
 
-  for file in /etc/apt/sources.list \
-      /etc/apt/sources.list.d/*.list \
-      /etc/apt/sources.list.d/*.sources; do
-    [ -f "$file" ] || continue
-    if grep -qsE "(^Suites:[[:space:]].*[[:space:]]${suite}([[:space:]]|$)|^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]]${suite}([[:space:]]|$))" "$file"; then
-      return 0
-    fi
-  done
-  return 1
+EOF
 }
 
-missing_base=false
-missing_security=false
-has_apt_suite trixie || missing_base=true
-has_apt_suite trixie-security || missing_security=true
+archive_key=/usr/share/keyrings/debian-archive-keyring
+# Older runs could append the same two stanzas repeatedly or conflict with a
+# system-provided Signed-By. Only rebuild files made entirely of our old output.
+is_old_bootstrap_file() {
+  local content block key
+  local sources_header='# Official Debian 13 (Trixie) repositories'
+  [[ -f "$TRIXIE_SOURCES" && ! -L "$TRIXIE_SOURCES" ]] || return 1
+  content=$(<"$TRIXIE_SOURCES")
+  [[ "$content" == "$sources_header" || "$content" == "$sources_header"$'\n'* ]] || return 1
+  content=${content#"$sources_header"}
+  for key in "$archive_key.pgp" "$archive_key.gpg"; do
+    block=$(write_stanza https://deb.debian.org/debian 'trixie trixie-updates' "$key")
+    content=${content//"$block"/}
+    block=$(write_stanza https://security.debian.org/debian-security trixie-security "$key")
+    content=${content//"$block"/}
+  done
+  [[ -z "${content//[[:space:]]/}" ]]
+}
 
-if ! $missing_base && ! $missing_security; then
-  echo "Trixie base, updates, and security repositories are already configured."
-else
-  keyring="/usr/share/keyrings/debian-archive-keyring.pgp"
-  if [ ! -e "$keyring" ]; then
-    keyring="/usr/share/keyrings/debian-archive-keyring.gpg"
-  fi
-
-  if [ ! -e "$TRIXIE_SOURCES" ]; then
-    printf '%s\n' '# Official Debian 13 (Trixie) repositories' > "$TRIXIE_SOURCES"
-  fi
-
-  if $missing_base; then
-    cat >> "$TRIXIE_SOURCES" <<EOF
-Types: deb
-URIs: https://deb.debian.org/debian
-Suites: trixie trixie-updates
-Components: main contrib non-free non-free-firmware
-Signed-By: $keyring
-
-EOF
-  fi
-
-  if $missing_security; then
-    cat >> "$TRIXIE_SOURCES" <<EOF
-Types: deb
-URIs: https://security.debian.org/debian-security
-Suites: trixie-security
-Components: main contrib non-free non-free-firmware
-Signed-By: $keyring
-
-EOF
-  fi
-  echo "Added missing Trixie repositories to $TRIXIE_SOURCES."
+parts=/etc/apt/sources.list.d
+sources_stage=$(mktemp -d "$parts/.crown-XXXXXXXX")
+rebuild=false
+if is_old_bootstrap_file; then
+  rebuild=true
 fi
+for file in "$parts"/*.list "$parts"/*.sources; do
+  [[ -f "$file" ]] || continue
+  if $rebuild && [[ "$file" == "$TRIXIE_SOURCES" ]]; then
+    continue
+  fi
+  ln -s -- "$file" "$sources_stage/"
+done
+
+# Read active binary indexes even on a fresh system with no package lists.
+# A conventional Debian mirror path identifies the archive before APT has its Origin.
+apt_view=(apt-get -o "Dir::Etc::sourceparts=$sources_stage" indextargets)
+# APT expands these format fields.
+# shellcheck disable=SC2016
+indexes=(--format '$(RELEASE) $(REPO_URI) $(ORIGIN)' 'Identifier: Packages'
+  'Component: main' "Architecture: $(dpkg --print-architecture)")
+suites=$(
+  { "${apt_view[@]}" "${indexes[@]}" && "${apt_view[@]}" --no-release-info "${indexes[@]}"; } |
+    awk '$3 != "$(ORIGIN)" { known[$1,$2]=1; if ($3 == "Debian") print $1; next }
+         !(($1,$2) in known) && $2 ~ /\/debian(-security)?\/$/ { print $1 }'
+)
+
+missing=()
+for suite in trixie trixie-updates trixie-security; do
+  grep -Fxq -- "$suite" <<< "$suites" || missing+=("$suite")
+done
+
+if (( ${#missing[@]} )); then
+  keyring="$archive_key.pgp"
+  [[ -r "$keyring" ]] || keyring="$archive_key.gpg"
+  [[ -r "$keyring" ]] || die "Debian archive keyring is missing."
+  # Minimal images can lack CA certificates until Step 3. APT still verifies
+  # the archive signature with the Debian keyring over either transport.
+  protocol=https
+  [[ -s /etc/ssl/certs/ca-certificates.crt ]] || protocol=http
+  candidate=$(mktemp "$sources_stage/crown-trixie-XXXXXXXX.sources")
+  echo '# Debian 13 repositories added by Crown Bootstrap' > "$candidate"
+  for suite in "${missing[@]}"; do
+    mirror=deb.debian.org/debian
+    [[ "$suite" != trixie-security ]] || mirror=security.debian.org/debian-security
+    write_stanza "$protocol://$mirror" "$suite" "$keyring" >> "$candidate"
+  done
+  chmod 644 "$candidate"
+  "${apt_view[@]}" --no-release-info > /dev/null
+  destination="$TRIXIE_SOURCES"
+  if ! $rebuild && [[ -e "$destination" || -L "$destination" ]]; then
+    destination="$parts/${candidate##*/}"
+  fi
+  mv -T -- "$candidate" "$destination"
+  echo "Configured ${missing[*]} in $destination."
+elif $rebuild; then
+  mv -- "$TRIXIE_SOURCES" "$BACKUP_DIR/debian-trixie.sources.$ts"
+  echo "Archived redundant bootstrap repositories. All three Trixie suites are configured."
+else
+  echo "Trixie base, updates, and security repositories are already configured."
+fi
+rm -rf -- "$sources_stage"
+sources_stage=""
+exec 9>&-
 
 echo "=== Step 3: Update packages and install prerequisites ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get clean
-apt-get update
+apt-get --error-on=any update
 apt-get upgrade -y
 apt-get install -y ca-certificates wget
 
